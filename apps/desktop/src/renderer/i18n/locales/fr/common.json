@@ -19036,5 +19036,27 @@
     "rendered": "Afficher le document",
     "wrap": "Retour à la ligne",
     "lineNumbers": "Numéros de ligne"
+  },
+  "roundtablePanel": {
+    "refresh": "Refresh status",
+    "select": "Select run",
+    "error": "Unable to access or control this Roundtable. Check account, Team permissions and state, then refresh.",
+    "loading": "Loading Roundtable…",
+    "empty": "No active Roundtable. Start one from the Lead; completed runs remain available here.",
+    "state": "Status",
+    "agent": "Executing Agent",
+    "turns": "Completed turns",
+    "budget": "{{count}} / 6 admitted turns",
+    "uncertain": "Restart or uncertain delivery: inspect the original execution manually. Automatic resume is disabled.",
+    "inFlight": "An Agent is executing. Pause only prevents subsequent dispatch; it does not interrupt the model.",
+    "stopping": "Stopped scheduling. An in-flight execution is still unconfirmed.",
+    "reason": "Reason",
+    "pause": "Pause",
+    "resume": "Resume",
+    "stop": "Stop",
+    "timeline": "Collaboration timeline",
+    "task": "Lead task",
+    "result": "Worker result",
+    "returned": "Message persisted to Lead"
   }
 }

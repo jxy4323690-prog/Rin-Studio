@@ -211,6 +211,15 @@ Worker 不得调用团队控制器。MVP 仅支持已有 active team、本机 Le
 终态钩子在 `orcaTeamService.ts` 和 `sessionEventTerminal.ts`。
 Windows 真实模型验收及限制见 `docs/analysis/rin-studio-roundtable-003.md`。
 
+004 本机面板：`OrcaWorkerPanel` 内嵌 `RoundtablePanel`，只投影 Controller 状态与 Lead
+会话内实际持久化的 Orca 回传消息。`maker:roundtable:panel` 不进入 device-link allowlist，
+Main 校验可信应用 Renderer、当前 owner 的本机 Lead，再由原 Controller 检查控制动作的
+Team 归属；Renderer 传来的 Lead ID 只是查询选择器，不是认证身份。IPC 仅开放
+getStatus/pause/resume/stop，Plan 模式禁止 resume，不提供创建/派发/权限提升入口。
+持久化保存后复用 `ORCA_WORKER_CHANGED` 事件触发读取，无轮询；账号切换清空旧内容，
+晚到的读取响应不能覆盖新 Lead。uncertain 只展示并允许 stop，不能通过 UI 自动重放。
+验收证据与 Windows 未验证边界见 `docs/analysis/rin-studio-roundtable-004.md`。
+
 ### Agent 工具的 Worker 默认路线（2026-10-29）
 
 `create_worker` / `create_workers` 的 `agent` 可省略。只有

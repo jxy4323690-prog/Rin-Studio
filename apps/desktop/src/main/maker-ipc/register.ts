@@ -1,3 +1,5 @@
+import { createRoundtablePanelHandler } from './roundtablePanelHandler.js';
+import { ROUNDTABLE_PANEL_CHANNEL } from '../../shared/roundtablePanel.js';
 import { OrcaRoundtable, createRoundtableCompletionRouter, type RoundtableRequest } from './orcaRoundtable.js';
 import { createRoundtableStore } from './orcaRoundtableStore.js';
 import { createTaskCompletionDeliveryHost, type TaskCompletionDeliveryHost } from './taskCompletionDeliveryHost.js';
@@ -16468,8 +16470,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       if (getCurrentDbClientSnapshot() !== owner) throw new Error('OWNER_CHANGED');
       return result;
     };
+    const roundtableStore = createRoundtableStore(ownerScopedUserDataPath('orca-roundtable'));
     controller = new OrcaRoundtable({
-      store: createRoundtableStore(ownerScopedUserDataPath('orca-roundtable')),
+      store: { ...roundtableStore, save: (run) => {
+        roundtableStore.save(run);
+        if (getCurrentDbClientSnapshot() === owner) broadcastToAllWindows(MAKER_PUSH.ORCA_WORKER_CHANGED, { leadSessionId: run.leadSessionId });
+      } },
       authorize,
       dispatchWorker: async (run, message, guard) => {
         const authority = await captureOrcaTaskAuthority();
@@ -16500,6 +16506,35 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   roundtableLeadTerminal = (id, execution, successful) => {
     void existingRoundtable()?.leadSettled(id, execution, successful).catch(() => log.warn('Roundtable terminal settlement requires status inspection'));
   };
+  const roundtablePanelHandler = createRoundtablePanelHandler({
+    captureAccess: () => {
+      const owner = getCurrentDbClientSnapshot();
+      if (!owner) throwIpcError('PERMISSION_DENIED', 'Owner unavailable');
+      return () => { if (getCurrentDbClientSnapshot() !== owner) throwIpcError('PERMISSION_DENIED', 'Owner changed'); };
+    },
+    readLead: async (id) => (await getDbClient().drizzle.select({ id: sessions.id, orcaRole: sessions.orcaRole, planModeEnabled: sessions.planModeEnabled,
+      remoteHostId: sessions.remoteHostId, agentDeviceId: sessions.agentDeviceId }).from(sessions).where(and(eq(sessions.id, id), eq(sessions.status, 'active'))).limit(1))[0] ?? null,
+    controller: roundtableForOwner,
+    readLeadReturns: async (id, runId) => {
+      const rows = await getDbClient().drizzle.select({ content: messages.content, agentMeta: messages.agentMeta })
+        .from(messages).where(and(eq(messages.sessionId, id), eq(messages.role, 'user'),
+          sql`instr(${messages.content}, ${`Roundtable ${runId}:`}) > 0`)).orderBy(desc(messages.createdAt)).limit(64);
+      return rows.reverse().flatMap(row => {
+        try {
+          const meta = JSON.parse(row.agentMeta ?? '{}');
+          const content = JSON.parse(row.content ?? '{}');
+          return meta.origin?.kind === 'orca' && content.orcaSource === 'worker'
+            && typeof content.content === 'string' && content.content.includes(`Roundtable ${runId}:`)
+            ? [content.content] : [];
+        } catch { return []; }
+      });
+    },
+  });
+  ipcMain.handle(ROUNDTABLE_PANEL_CHANNEL, async (event, body: unknown) => {
+    if (isDeviceLinkInvoke()) throwIpcError('PERMISSION_DENIED', 'Local desktop only');
+    assertTrustedAppRendererEvent(event);
+    return roundtablePanelHandler(body);
+  });
   orcaTeamServiceForEvents = orcaTeamService;
   // 数据库可能晚于本注册就绪；bootstrap 在接管数据库后会再调一次，两种顺序都覆盖。
   void restoreOrcaRemoteWorkersForCurrentOwner();

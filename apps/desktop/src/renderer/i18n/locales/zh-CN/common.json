@@ -18794,5 +18794,27 @@
     "rendered": "查看文稿",
     "wrap": "自动换行",
     "lineNumbers": "行号"
+  },
+  "roundtablePanel": {
+    "refresh": "查看状态",
+    "select": "选择讨论",
+    "error": "无法读取或控制此讨论，请检查账号、Team 权限和状态后刷新。",
+    "loading": "正在读取讨论…",
+    "empty": "当前没有进行中的 Roundtable。请从 Lead 启动；历史讨论仍可查看。",
+    "state": "状态",
+    "agent": "当前执行 Agent",
+    "turns": "已完成回合",
+    "budget": "已接受 {{count}} / 6 轮",
+    "uncertain": "重启或投递结果不确定：请人工核对原执行，不能自动恢复。",
+    "inFlight": "Agent 正在执行。暂停只阻止后续派单，不会立即中断模型。",
+    "stopping": "已终止后续调度，仍有在途执行尚未确认结束。",
+    "reason": "原因",
+    "pause": "暂停",
+    "resume": "继续",
+    "stop": "终止",
+    "timeline": "协同时间线",
+    "task": "Lead 派单",
+    "result": "Worker 实际结果",
+    "returned": "已落库的 Lead 回传消息"
   }
 }

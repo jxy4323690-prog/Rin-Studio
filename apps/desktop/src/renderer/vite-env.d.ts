@@ -5287,6 +5287,7 @@ interface ElectronAPI {
       }) => Promise<{ kind: 'share' | 'directory' | 'other' }>;
     };
     orcaWorkflows: {
+      roundtablePanel: (request: import('../shared/roundtablePanel').RoundtablePanelRequest) => Promise<import('../shared/roundtablePanel').RoundtablePanelSnapshot>;
       projectContext: {
         (leadSessionId: string): Promise<import('../shared/orca-worker-project').WorkerProjectContext>;
         (leadSessionId: string, directory: string): Promise<import('../shared/orca-worker-project').WorkerProjectInfo>;

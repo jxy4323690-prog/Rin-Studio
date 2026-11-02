@@ -32,6 +32,7 @@ const mocks = vi.hoisted(() => ({
   },
 }));
 
+vi.mock('../RoundtablePanel', () => ({ RoundtablePanel: () => null }));
 vi.mock('react-router-dom', async (importOriginal) => ({
   ...await importOriginal<typeof import('react-router-dom')>(),
   useNavigate: () => vi.fn(),

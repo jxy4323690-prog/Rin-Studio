@@ -1,3 +1,4 @@
+import { RoundtablePanel } from './RoundtablePanel';
 /**
  * OrcaWorkerPanel —— 右侧栏「协同」tab 内的 worker-only 面板。
  *
@@ -232,6 +233,7 @@ export function OrcaWorkerPanel({
           clearAttentionWhenVisible={workerConversationVisible}
         />
       </div>
+      {viewVisible && deviceId === null && agentDeviceId === null && !sshRemote && !isSidebarWindow() && <RoundtablePanel key={leadSessionId} leadSessionId={leadSessionId} />}
       <div className="chat-rail-compact min-h-0 flex-1">
         {workerSessionId && isSidebarWindow() ? (
           <div className="flex h-full w-full flex-col items-center justify-center gap-3 px-6 text-center">

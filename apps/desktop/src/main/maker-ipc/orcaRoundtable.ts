@@ -65,6 +65,9 @@ export class OrcaRoundtable {
   }
   private save(run: RoundtableRun) { this.deps.store.save(structuredClone(run)); }
   private snapshot(run: RoundtableRun) { return structuredClone(run); }
+  runsForLead(leadSessionId: string): RoundtableRun[] {
+    return [...this.runs.values()].filter(r => r.leadSessionId === leadSessionId).map(r => this.snapshot(r));
+  }
   ownsWorker(sessionId: string) {
     return [...this.runs.values()].some(r => r.workerSessionId === sessionId
       && (this.recoveredRuns.has(r.runId) || (r.inFlight && !!r.workerExecutionId)));

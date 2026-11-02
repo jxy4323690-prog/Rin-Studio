@@ -6179,6 +6179,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         ipcRenderer.invoke('local-db:session-share:classify-path', request),
     },
     orcaWorkflows: {
+      roundtablePanel: (request: import('../shared/roundtablePanel').RoundtablePanelRequest): Promise<import('../shared/roundtablePanel').RoundtablePanelSnapshot> => ipcRenderer.invoke('maker:roundtable:panel', request),
       projectContext: (leadSessionId: string, directory?: string) => ipcRenderer.invoke('maker:worker:project-context', leadSessionId, directory),
       projectLabel: (workerSessionId: string) => ipcRenderer.invoke('maker:worker:project-label', workerSessionId),
       getByLeadSession: (leadSessionId: string): Promise<unknown> =>
