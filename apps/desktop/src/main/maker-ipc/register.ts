@@ -1,3 +1,5 @@
+import { OrcaRoundtable, createRoundtableCompletionRouter, type RoundtableRequest } from './orcaRoundtable.js';
+import { createRoundtableStore } from './orcaRoundtableStore.js';
 import { createTaskCompletionDeliveryHost, type TaskCompletionDeliveryHost } from './taskCompletionDeliveryHost.js';
 import { setRoutineResultDispatch } from '../routines/deliveryDispatch.js';
 import { McpSetupBridge } from './mcpSetupBridge.js';
@@ -1618,6 +1620,7 @@ async function prepareProjectSkillLinksFailSoft(workingDir: unknown): Promise<bo
 const workerTurnStartSequencer = createWorkerTurnStartSequencer(log);
 // session event wiring 是模块级函数；service 在 registerMakerIpc 内构造后注入给事件回调。
 let orcaTeamServiceForEvents: OrcaTeamService | null = null;
+let roundtableLeadTerminal: ((id: string, execution: { instanceId: string; generation: number }, successful: boolean) => void) | undefined;
 // 协同远端 Worker 的宿主装配；bootstrapSession 据此拒绝在本机启动远端 Worker 的代理任务。
 let orcaRemoteWorkersForHost: OrcaRemoteWorkers | null = null;
 // silent-stop 自动续跑守卫(决策语义与防死循环不变量见 silentStopAutoResume.ts 文件头)。
@@ -2629,6 +2632,7 @@ type SendToSessionInternalResult =
 
 /** 暴露给 xdt-helper MCP provider 的协同控制面，必须复用 IPC 同源业务路径。 */
 interface OrcaCollabService {
+  roundtable(params: RoundtableRequest): Promise<unknown>;
   listSessionQueue: (
     sessionId: string,
   ) => Promise<
@@ -6403,6 +6407,7 @@ const sessionEventDependencies: SessionEventDependencies = {
   get workerTurnStartSequencer() {
     return workerTurnStartSequencer;
   },
+  onRoundtableLeadTerminal: (id, execution, successful) => roundtableLeadTerminal?.(id, execution, successful),
   get orcaTeamServiceForEvents() {
     return orcaTeamServiceForEvents;
   },
@@ -15687,6 +15692,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   const dispatchOrEnqueueOrcaInterAgentMessage: OrcaInterAgentDispatcher['dispatchOrEnqueueOrcaInterAgentMessage'] =
     async (params) => {
       try {
+        if (params.source === 'worker' && params.meta.source !== 'maker-ipc/roundtable-report'
+          && !!params.workerId && roundtableForOwner().ownsWorkerId(params.workerId)) throw new Error('Roundtable reports are delivered at the Worker product terminal; include collaboration requests in your final result.');
         await assertReviewExternalInputAllowed(params.targetSessionId);
       } catch (error) {
         return {
@@ -16281,9 +16288,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       onAcceptedRollback,
       onAcceptedCommit,
     }) => {
+      if (dispatchMeta.source !== 'maker-ipc/roundtable' && roundtableForOwner().ownsWorker(targetSessionId)) throw new Error('Stop the active Roundtable before replacing its Worker assignment.');
       const result = await dispatchOrEnqueueOrcaInterAgentMessage({
         targetSessionId,
         rawContent: message,
+        directOnly: dispatchMeta.source === 'maker-ipc/roundtable',
         source: 'lead',
         senderLabel: 'Lead',
         workerId,
@@ -16319,6 +16328,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       onAcceptedRollback,
       onAcceptedCommit,
     }) => {
+      if (roundtableForOwner().ownsWorker(targetSessionId)) throw new Error('Stop the active Roundtable before replacing its Worker assignment.');
       const result = await orcaInterAgentDispatcher.reserveNextOrcaInterAgentMessage({
         targetSessionId,
         rawContent: message,
@@ -16412,6 +16422,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       inputCoordinator.mergeQueuedMessagesAtomically(sessionId, clientIds, buildReplacement).merged,
     steerStoredQueuedMessage: steerStoredControlMessage,
     moveQueuedMessage: moveStoredControlMessage,
+    onRoundtableWorkerAccepted: (sessionId, identity) => roundtableCompletionRouter.accepted(sessionId, identity),
+    routeWorkerCompletion: (terminal) => roundtableCompletionRouter.completed(terminal),
     sendAutoBridgeToLead: async (leadSessionId, message, workerId) => {
       const result = await dispatchInterAgentMessage({
         targetSessionId: leadSessionId,
@@ -16428,6 +16440,66 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     },
     log,
   }));
+  const roundtableCompletionRouter = createRoundtableCompletionRouter(roundtableForOwner, createId);
+  const roundtableOwners = new WeakMap<object, OrcaRoundtable>();
+  function existingRoundtable(): OrcaRoundtable | undefined {
+    const owner = getCurrentDbClientSnapshot();
+    return owner ? roundtableOwners.get(owner) : undefined;
+  }
+  function roundtableForOwner(): OrcaRoundtable {
+    const owner = getCurrentDbClientSnapshot();
+    if (!owner) throw new Error('HOST_NOT_READY');
+    let controller = roundtableOwners.get(owner);
+    if (controller) return controller;
+    const authorize = async (leadSessionId: string, workerId?: string) => {
+      if (getCurrentDbClientSnapshot() !== owner) throw new Error('OWNER_CHANGED');
+      const [lead] = await owner.client.drizzle.select().from(sessions).where(eq(sessions.id, leadSessionId)).limit(1);
+      const team = await getActiveTeamByLead(leadSessionId);
+      if (!lead || lead.orcaRole !== 'lead' || lead.status !== 'active' || lead.remoteHostId || lead.agentDeviceId || !team) throw new Error('LOCAL_ACTIVE_LEAD_REQUIRED');
+      await assertLeadCollabProjectEnabled(leadSessionId);
+      const result: { teamId: string; workerId?: string; workerSessionId?: string } = { teamId: team.id };
+      if (workerId) {
+        const worker = (await listWorkersByLead(leadSessionId)).find(w => w.id === workerId);
+        if (!worker || worker.teamId !== team.id) throw new Error('WORKER_NOT_AUTHORIZED');
+        const [row] = await owner.client.drizzle.select().from(sessions).where(eq(sessions.id, worker.sessionId)).limit(1);
+        if (!row || row.remoteHostId || row.agentDeviceId || row.permissionMode !== 'auto' || row.planModeEnabled) throw new Error('LOCAL_AUTO_PERMISSION_WORKER_REQUIRED');
+        result.workerId = worker.id; result.workerSessionId = worker.sessionId;
+      }
+      if (getCurrentDbClientSnapshot() !== owner) throw new Error('OWNER_CHANGED');
+      return result;
+    };
+    controller = new OrcaRoundtable({
+      store: createRoundtableStore(ownerScopedUserDataPath('orca-roundtable')),
+      authorize,
+      dispatchWorker: async (run, message, guard) => {
+        const authority = await captureOrcaTaskAuthority();
+        const result = await orcaTeamService.sendToWorker({ callerLeadSessionId: run.leadSessionId,
+          targetSessionId: run.workerSessionId!, message: `${message}\n\nRoundtable ${run.runId}: return your real result as final output. Product completion reports it to Lead automatically. Request any collaborator in that result; do not manage the Team or repeatedly call send_to_lead.`, directOnly: true }, async () => { await authority.assertCurrent(); await guard(); });
+        if (!result.ok) throw new Error(result.errorCode === 'BUSY' || result.message.includes('ROUNDTABLE_NOT_DISPATCHED') ? 'NOT_DISPATCHED' : 'DELIVERY_UNCONFIRMED');
+      },
+      dispatchLead: async (run, message, guard) => {
+        // Lead already has a runtime from the initiating turn. Never bypass rollover or queue locks.
+        const authority = await captureOrcaDeliveryAuthority(run.leadSessionId);
+        const result = await dispatchOrEnqueueOrcaInterAgentMessage({ targetSessionId: run.leadSessionId,
+          rawContent: message, source: 'worker', senderLabel: 'Worker', workerId: run.workerId,
+          directOnly: true, onAccepted: async () => {
+            try { await authority(); await guard(); }
+            catch { throw new AcceptedCallbackDispatchCancelled('ROUNDTABLE_NOT_DISPATCHED'); }
+          },
+          meta: { source: 'maker-ipc/roundtable-report', context: `roundtable/${run.runId}` } });
+        if (result.ok) {
+          const live = maker.getSession(run.leadSessionId);
+          if (live) controller!.noteLeadExecution(run.runId, { instanceId: live.instanceId, generation: live.getTurnGeneration() });
+        }
+        if (!result.ok) throw new Error(result.dispatchOutcome.kind === 'host-send' && (result.dispatchOutcome.code === 'SESSION_RUNNING' || result.dispatchOutcome.message.includes('ROUNDTABLE_NOT_DISPATCHED')) ? 'NOT_DISPATCHED' : 'DELIVERY_UNCONFIRMED');
+      },
+    });
+    roundtableOwners.set(owner, controller);
+    return controller;
+  }
+  roundtableLeadTerminal = (id, execution, successful) => {
+    void existingRoundtable()?.leadSettled(id, execution, successful).catch(() => log.warn('Roundtable terminal settlement requires status inspection'));
+  };
   orcaTeamServiceForEvents = orcaTeamService;
   // 数据库可能晚于本注册就绪；bootstrap 在接管数据库后会再调一次，两种顺序都覆盖。
   void restoreOrcaRemoteWorkersForCurrentOwner();
@@ -17962,6 +18034,16 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   // tryGetOrcaCollabService() 拿到这些函数引用, 让 MCP tool
   // 走与 IPC handler 完全相同的业务路径。
   orcaCollabServiceHolder = {
+    roundtable: async (params) => {
+      const authority = await captureOrcaTaskAuthority();
+      await authority.assertCurrent();
+      const controller = roundtableForOwner();
+      if (params.action === 'start') {
+        const live = maker.getSession(params.callerSessionId);
+        if (live) controller.noteLeadExecution(params.runId, { instanceId: live.instanceId, generation: live.getTurnGeneration() }, true);
+      }
+      return controller.command(params);
+    },
     listSessionQueue: async (sessionId) => {
       try {
         const meta = await maker.getSessionMeta(sessionId);
@@ -18065,7 +18147,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     disableOrca: disableOrcaInternal,
     // MCP worker 派活必须经 OrcaTeamService，确保 running、resume idle、广播和
     // 公开错误码映射都与 IPC handler WORKER_SEND_TO 保持同一套状态机。
-    sendToWorker: (params) => orcaTeamService.sendToWorker(params),
+    sendToWorker: (params) => {
+      if (roundtableForOwner().ownsLead(params.callerLeadSessionId)) return Promise.resolve({ ok: false as const, errorCode: 'BUSY' as const, message: 'Use roundtable dispatch or stop the active run first.' });
+      return orcaTeamService.sendToWorker(params);
+    },
     interruptWorker: (params) => orcaTeamService.interruptWorker(params),
     // 排队消息控制统一走 OrcaTeamService,复用 resolveWorkerRef 归属校验与
     // coordinator 的 remove/replace 原语(cancel 经 remove 触发 discard settle)。

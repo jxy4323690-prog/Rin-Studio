@@ -1154,7 +1154,7 @@ it('passes the dispatcher Agent receipt through the host worker adapter', async 
   }));
   const compiled = ts.transpileModule(`return ({${register.slice(start, end)}}).dispatchWorkerMessage;`,
     { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-  const dispatchWorkerMessage = new Function('dispatchOrEnqueueOrcaInterAgentMessage', compiled)(dispatched);
+  const dispatchWorkerMessage = new Function('dispatchOrEnqueueOrcaInterAgentMessage', 'roundtableForOwner', compiled)(dispatched, () => ({ ownsWorker: () => false }));
   await expect(dispatchWorkerMessage({
     targetSessionId: 'worker-session', message: 'Continue', workerId: 'worker-1',
     dispatchMeta: { source: 'orca', context: 'switched-agent-receipt' },
@@ -1252,4 +1252,19 @@ it.each(['rejected', 'throw', 'running'] as const)('keeps history for retry afte
     expect(firstQueuedItem(h.queuedItems).text).not.toContain('Pending history');
     expect(firstQueuedItem(h.queuedItems).persistedContent).not.toContain('Pending history');
   }
+});
+
+// Bounded Roundtable inputs never survive as an unguarded persisted queue after a crash.
+it.each(['busy', 'no-live', 'race', 'steer'] as const)('directOnly refuses %s without queueing or hidden internal send', async kind => {
+  const h = createHarness({
+    ...(kind === 'busy' ? { shouldQueueNewTurn: () => true } : {}),
+    ...(kind === 'no-live' ? { getLiveSession: () => null } : {}),
+  });
+  if (kind === 'race') h.liveSession.send.mockRejectedValue(Error('SESSION_RUNNING'));
+  const result = await h.dispatcher.dispatchOrEnqueueOrcaInterAgentMessage({
+    targetSessionId: 'target-session', rawContent: 'bounded task', source: 'lead', senderLabel: 'Lead',
+    directOnly: true, ...(kind === 'steer' ? { delivery: 'steer' as const } : {}), meta: { source: 'maker-ipc/roundtable', context: 'bounded' },
+  });
+  expect(result.ok).toBe(false); expect(h.queuedItems).toHaveLength(0);
+  expect(h.deps.sendToSessionInternal).not.toHaveBeenCalled();
 });

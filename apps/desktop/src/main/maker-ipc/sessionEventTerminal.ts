@@ -61,6 +61,7 @@ import {
   type ProductTurnFailureOwner,
 } from './productTurnFailureOwner.js';
 export interface FinishSessionTerminalEventDeps {
+  readonly onRoundtableLeadTerminal?: (sessionId: string, execution: { instanceId: string; generation: number }, successful: boolean) => void;
   readonly sessionListActivityTracker: SessionListActivityTracker;
   readonly onPluginTaskTerminal?: (sessionId: string, execution: { instanceId: string; generation: number }, outcome: 'completed' | 'failed' | 'cancelled' | 'interrupted', outputMessageId?: string, inputClientIds?: string[]) => void;
   readonly onSuccessfulProductTurn?: (
@@ -687,6 +688,7 @@ export function finishSessionTerminalEvent(
           ? nativeStatus : unsuccessfulBoundary ? 'failed' : 'completed';
         // Settle the precise native outcome before generic unsuccessful-turn
         // bookkeeping can enqueue its fallback failure for the same execution.
+        deps.onRoundtableLeadTerminal?.(session.id, { instanceId: event.sessionInstanceId ?? session.instanceId, generation: event.sessionTurnGeneration }, outcome === 'completed');
         deps.onPluginTaskTerminal?.(session.id, {
           instanceId: event.sessionInstanceId ?? session.instanceId,
           generation: event.sessionTurnGeneration,

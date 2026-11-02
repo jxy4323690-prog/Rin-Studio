@@ -1,3 +1,4 @@
+import { OrcaRoundtable, createRoundtableCompletionRouter, type RoundtableRun } from '../orcaRoundtable.js';
 import { admitTaskAction, captureTaskActionGuard } from '../taskActionAuthorization.js';
 import { describe, expect, it, vi } from 'vitest';
 import {readFileSync} from 'node:fs';
@@ -4079,4 +4080,55 @@ describe('Orca delivery scope', () => {
     expect(evaluate({ row: row({ status: 'deleted' }) })).toBe('task-gone');
     expect(evaluate({ row: null })).toBe('task-gone');
   });
+});
+
+// Unit tier: real Orca service dispatch and terminal/auto-bridge boundary. Only model I/O is fake.
+it.each(['done', 'interrupted'] as const)('relays real Orca Worker product completion through Roundtable exactly once: %s', async outcome => {
+  let controller!: OrcaRoundtable;
+  let router!: ReturnType<typeof createRoundtableCompletionRouter>; let sequence = 0;
+  const h = createDeps({ onRoundtableWorkerAccepted: (sessionId, identity) => router.accepted(sessionId, identity),
+    routeWorkerCompletion: terminal => router.completed(terminal) });
+  h.setWorker(createWorker({ session: { ...createWorker().session, permissionMode: 'auto' } }));
+  const journal = new Map<string, RoundtableRun>();
+  const leadDispatch = vi.fn(async () => undefined);
+  controller = new OrcaRoundtable({
+    store: { load: () => [], save: r => { journal.set(r.runId, r); }, claim: () => {}, release: () => {} },
+    authorize: async (lead, worker) => {
+      if (lead !== 'lead-1') throw Error('NOT_AUTHORIZED');
+      return { teamId: 'team-1', ...(worker ? { workerId: 'worker-1', workerSessionId: 'worker-session-1' } : {}) };
+    },
+    dispatchWorker: async (run, message, guard) => {
+      const result = await h.service.sendToWorker({ callerLeadSessionId: run.leadSessionId,
+        targetSessionId: run.workerSessionId!, message, directOnly: true }, guard);
+      if (!result.ok) throw Error(result.message);
+    }, dispatchLead: leadDispatch,
+  });
+  router = createRoundtableCompletionRouter(() => controller, () => String(++sequence));
+  const command = (action: 'start' | 'dispatch', requestId?: string) => controller.command({
+    callerSessionId: 'lead-1', action, runId: 'integrated', requestId,
+    workerId: 'worker-1', message: 'Analyze source with controlled permissions',
+  });
+  await command('start'); await command('dispatch', 'q1');
+  expect(h.deps.dispatchWorkerMessage).toHaveBeenCalledOnce();
+  if (outcome === 'interrupted') h.setManualInterrupt('user_stop');
+  const capture = h.service.captureWorkerTerminalTurn('worker-session-1');
+  await h.service.handleWorkerTerminalTurn({ sessionId: 'worker-session-1', status: 'done', finalText: 'Real adapted result', capture });
+  await h.service.handleWorkerTerminalTurn({ sessionId: 'worker-session-1', status: 'done', finalText: 'Real adapted result', capture });
+  if (outcome === 'interrupted') {
+    expect(leadDispatch).not.toHaveBeenCalled();
+    expect(journal.get('integrated')).toMatchObject({ state: 'failed', reason: 'worker_failed', inFlight: false });
+    return;
+  }
+  expect(leadDispatch).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ leadSessionId: 'lead-1' }), expect.stringContaining('Real adapted result'), expect.any(Function));
+  expect(h.deps.sendAutoBridgeToLead).not.toHaveBeenCalled();
+  await command('dispatch', 'q2'); expect(h.deps.dispatchWorkerMessage).toHaveBeenCalledTimes(2);
+});
+
+it('preserves the ordinary acceptance guard when a delivery-scope authorizer is absent', async () => {
+  let allowed = true;
+  const h = createDeps({ captureControlAuthority: async () => async () => { if (!allowed) throw Error('revoked'); } });
+  const original = h.deps.dispatchWorkerMessage;
+  h.deps.dispatchWorkerMessage = async params => { allowed = false; return original(params); };
+  expect(await h.service.sendToWorker({ callerLeadSessionId: 'lead-1', targetSessionId: 'worker-session-1', message: 'ordinary' })).toMatchObject({ ok: false });
+  expect(h.getWorker().status).toBe('idle');
 });

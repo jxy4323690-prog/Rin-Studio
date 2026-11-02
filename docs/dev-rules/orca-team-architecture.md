@@ -175,6 +175,42 @@ Worker 权限是 **Worker 创建偏好**，与 Agent、模型、effort、Fast �
   并为兼容保留待发送 Lead 文本。二段派单发生隧道超时时不自动重试，也不把模糊终态说成
   失败，避免同一任务重复执行；UI 引导用户先查看 Worker 面板。
 
+### Rin Studio Roundtable MVP（本机、有界 Lead/Worker 接力）
+
+显式调用新增 `cindy_orca.roundtable` 工具进入 Roundtable；普通 Orca 行为不变。
+Host 入口仍走 `DirectToolSink` 的真实 session context、`withToolCallAuthority` 和任务行动授权，
+Worker 不得调用团队控制器。MVP 仅支持已有 active team、本机 Lead 与本机 `auto` 权限 Worker，
+不创建 Worker、不更改权限偏好、不接远端或手机。
+
+- `start/dispatch/finish/pause/resume/stop/getStatus` 共用独立 `OrcaRoundtable` 状态机。
+  `run_id` 是持久唯一标识；`request_id` 使 Lead 的同一派单幂等。
+- Lead 真正通过 `OrcaTeamService.sendToWorker` 派发；Worker 的产品 terminal 经
+  `routeWorkerCompletion` 将真实结果交回 Lead，代替本次常规 auto-bridge，不能重复补报。
+  手动 `send_to_lead` 不在 Worker 执行中额外开启 Lead 轮次；请求其他 Worker 写入最终结果，
+  由 Lead 用结构化 `roundtable dispatch` 决定，不授予 Worker Team 管理权。
+- 一次最多 6 次 Agent 轮次（含初始 Lead 和每次结果唤醒，不含状态查询等控制动作）。
+  Lead 可继续派单、显式 finish，或由其匹配的产品终态自然结束；错误安全收口。
+- `directOnly` 是 dispatcher 的可选内部策略：尊重现有队列/发送锁，但禁止遗留后台排队输入，
+  忙碌、换窗后无 live runtime、SESSION_RUNNING 竞态均不自动排队。常规 Orca 默认策略不变。
+  快 Worker 的结果若撞上初始 Lead 尚未结束，先保留；Lead 产品终态驱动再次投递。
+  其他忙碌/已有队列情况下暂停并明确要求检查后 resume，不用定时器绕开队列暂停。
+- pause 不打断已被接受的执行；stop 禁止后续接力，不宣称已中断在途模型。
+  `inFlight` 与 `leadActive` 明确记录尚未收口的执行；只在完成回调确认后释放团队 claim。
+- `ownerScopedUserDataPath('orca-roundtable')` 下原子 JSON 日志及独占 claim 保存 run/Team 归属，
+  不迁移数据库。崩溃/重入后未完成 run 标记 uncertain，禁止自动 replay；同 Team 的 claim
+  不擅自解除，避免第二进程误发。不确定投递同样不自动重发。
+  当前版本不提供自动跨崩溃对账恢复；应先核实旧执行并显式结束旧 Team，再启动独立的新 Lead/Team/run。
+
+003.5 审查补充：Worker 终态必须匹配 `onRoundtableWorkerAccepted` 绑定的实际派单身份，
+不能只按 session 匹配；旧任务在新派发准备期间结束，不推进新 run。Lead 产品终态若早于发送
+回执到达，先暂存、待派发边界结算后按 instance/generation 消费，暂停和停止仍优先。
+完成路由及写入口在判断归属前加载 owner 的恢复日志，未知结果不能通过普通回报旁路继续。
+取消派发时仍有活跃 Lead 的 Team claim 不提前释放；directOnly 明确拒绝 steer。
+
+源码：`maker-ipc/orcaRoundtable.ts`、`orcaRoundtableStore.ts`、`register.ts` 的 owner-scoped adapter；
+终态钩子在 `orcaTeamService.ts` 和 `sessionEventTerminal.ts`。
+Windows 真实模型验收及限制见 `docs/analysis/rin-studio-roundtable-003.md`。
+
 ### Agent 工具的 Worker 默认路线（2026-10-29）
 
 `create_worker` / `create_workers` 的 `agent` 可省略。只有

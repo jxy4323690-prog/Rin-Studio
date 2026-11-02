@@ -427,6 +427,8 @@ export interface OrcaTeamServiceDeps {
   }>;
   /** Synchronous coordinator projection used when the stop adapter cannot return a result. */
   getWorkerQueuePaused(sessionId: string): boolean;
+  onRoundtableWorkerAccepted?(sessionId: string, identity: object): void;
+  routeWorkerCompletion?(input: { sessionId: string; status: 'done' | 'error'; identity: object; result: string }): Promise<boolean>;
   sendAutoBridgeToLead(
     leadSessionId: string,
     message: string,
@@ -476,6 +478,7 @@ export interface OrcaTeamService {
     callerLeadSessionId: string;
     targetSessionId: string;
     message: string;
+    directOnly?: boolean;
     delivery?: 'queue' | 'steer';
   }, assertCurrent?: () => Promise<void>): Promise<SendToWorkerResult>;
   /** Sole public entry for replacing the active worker turn. */
@@ -812,7 +815,8 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
       : '[Auto-bridged: worker 已完成，系统自动回传结果]';
     let accepted = false;
     try {
-      accepted = (await deps.sendAutoBridgeToLead(
+      accepted = await deps.routeWorkerCompletion?.({ sessionId, status: turn.status, identity: state, result: `${header}\n\n${finalText}` }) === true;
+      if (!accepted) accepted = (await deps.sendAutoBridgeToLead(
         state.leadSessionId, `${header}\n\n${finalText}`, state.workerId,
       )).accepted;
     } catch (err) {
@@ -1092,6 +1096,7 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
     resolved: ResolvedWorker;
     message: string;
     mode: 'normal' | 'interrupt';
+    directOnly?: boolean;
     delivery?: 'queue' | 'steer';
     imagePaths?: string[];
     dispatchMeta: DispatchWorkerTaskParams['dispatchMeta'];
@@ -1188,6 +1193,7 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
               workerId: target.id,
               leadSessionId: link.leadSessionId,
             });
+            if (params.dispatchMeta.source === 'maker-ipc/roundtable') deps.onRoundtableWorkerAccepted?.(target.sessionId, currentPending);
             let resolveSettlement!: (settlement: ProvisionalDispatchSettlement) => void;
             const settlement = new Promise<ProvisionalDispatchSettlement>((resolve) => {
               resolveSettlement = resolve;
@@ -1317,6 +1323,7 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
     callerLeadSessionId: string;
     targetSessionId: string;
     message: string;
+    directOnly?: boolean;
     delivery?: 'queue' | 'steer';
     imagePaths?: string[];
   }, assertCurrent?: () => Promise<void>): Promise<SendToWorkerResult> {
@@ -1337,6 +1344,7 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
     targetSessionId: string;
     message: string;
     mode: 'normal' | 'interrupt';
+    directOnly?: boolean;
     delivery?: 'queue' | 'steer';
     imagePaths?: string[];
   }, captured?: () => Promise<void>): Promise<SendToWorkerResult | InterruptWorkerResult> {
@@ -1351,7 +1359,10 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
     const assertCurrent = captured ?? await deps.captureControlAuthority?.(params.callerLeadSessionId);
     // A queued item is accepted only when the worker drains it, which can be long after this
     // turn ended: that callback must use the delivery guard instead.
-    const assertDeliveryCurrent = await deps.captureDeliveryAuthority?.(params.callerLeadSessionId);
+    const deliveryAuthority = await deps.captureDeliveryAuthority?.(params.callerLeadSessionId);
+    const assertDeliveryCurrent = params.directOnly
+      ? async () => { await deliveryAuthority?.(); await assertCurrent?.(); }
+      : deliveryAuthority;
     const resolved = await resolveWorkerRef(params.callerLeadSessionId, params.targetSessionId);
     if (!resolved.ok) {
       return {
@@ -1372,7 +1383,7 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
       assertCurrent,
       assertDeliveryCurrent,
       dispatchMeta: {
-        source: 'maker-ipc/collab',
+        source: params.directOnly ? 'maker-ipc/roundtable' : 'maker-ipc/collab',
         context:
           params.mode === 'normal'
             ? `send_to_worker/${resolved.worker.sessionId}/dispatch-worker-message`
@@ -2291,6 +2302,10 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
       }
 
       if (manualInterruptSuppressed && manualInterruptOwnership) {
+        await deps.routeWorkerCompletion?.({
+          sessionId: params.sessionId, status: 'error', identity: autoBridgeAtEntry ?? manualInterruptOwnership,
+          result: 'Worker execution interrupted by the user; no automatic continuation.',
+        });
         deps.log.info('worker manual interrupt: suppressed auto-bridge', {
           workerId: link.workerId,
           leadSessionId: link.leadSessionId,

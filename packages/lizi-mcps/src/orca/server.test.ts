@@ -1,6 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { createOrcaMcpServer, type OrcaMcpDeps, type OrcaMcpSessionCtx } from './server.js';
 
@@ -64,5 +64,35 @@ describe('cindy_orca.read_worker', () => {
     expect(payload.ok).toBe(true);
     expect(payload.turnError).toBeNull();
     await h.cleanup();
+  });
+});
+
+// Unit tier: real MCP transport and existing Host authorizer, no model/runtime.
+describe('cindy_orca.roundtable authenticated routing', () => {
+  async function roundtableHarness(role: 'lead' | 'worker', allowed = true) {
+    const call = vi.fn(async params => ({ runId: params.runId }));
+    const authorize = vi.fn(async () => allowed ? { ok: true as const } : { ok: false as const, errorCode: 'DENIED', message: 'No authority' });
+    const server = createOrcaMcpServer({ roundtable: call, authorizeCall: authorize } as unknown as OrcaMcpDeps, {
+      sessionId: 'real-session', agentKind: 'claude-code', workingDir: '/tmp', vendorOptions: { orcaRole: role },
+    } as OrcaMcpSessionCtx);
+    const [clientTx, serverTx] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'roundtable-test', version: '1' });
+    await Promise.all([server.connect(serverTx), client.connect(clientTx)]);
+    return { call, authorize, client, close: async () => { await client.close(); await server.close(); } };
+  }
+  it('uses attested caller identity rather than a supplied Lead ID', async () => {
+    const h = await roundtableHarness('lead');
+    try {
+      expect(payloadOf(await h.client.callTool({ name: 'roundtable', arguments: { action: 'start', run_id: 'r1', callerSessionId: 'forged' } })).ok).toBe(true);
+      expect(h.call).toHaveBeenCalledWith(expect.objectContaining({ callerSessionId: 'real-session', runId: 'r1' }));
+      expect(h.authorize).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'real-session', server: 'cindy_orca', tool: 'roundtable' }));
+    } finally { await h.close(); }
+  });
+  it.each(['worker', 'denied'] as const)('does not call the controller for %s', async mode => {
+    const h = await roundtableHarness(mode === 'worker' ? 'worker' : 'lead', mode !== 'denied');
+    try {
+      expect(payloadOf(await h.client.callTool({ name: 'roundtable', arguments: { action: 'start', run_id: 'r1' } })).ok).toBe(false);
+      expect(h.call).not.toHaveBeenCalled();
+    } finally { await h.close(); }
   });
 });

@@ -84,6 +84,10 @@ import { errorPayload, okPayload } from '../xdt-helper/_payload.js';
  * (从原 lizi_xdtHelperMcpServer.ts 拆出, 随 team 工具一起独立成 cindy_orca server。)
  */
 export interface OrcaMcpDeps {
+  roundtable?: (params: {
+    callerSessionId: string; action: 'start' | 'dispatch' | 'finish' | 'pause' | 'resume' | 'stop' | 'getStatus';
+    runId: string; requestId?: string; workerId?: string; message?: string;
+  }) => Promise<unknown>;
   authorizeCall?: ToolCallAuthorizer;
   logger?: import('../types.js').LiziMcpLogger;
   /** 启动 multi-worker workflow (只建 team, 不含 worker / initial_task)。 */
@@ -524,6 +528,22 @@ export function createOrcaMcpServer(
   // (sessionId / vendorOptions), 调用时把请求路由回 host。
   const sink = new DirectToolSink(server, deps.authorizeCall, () => resolveLiziMcpSessionContext(ctx).sessionId);
   const getSessionContext = () => resolveLiziMcpSessionContext(ctx);
+  if (deps.roundtable) sink.register({
+    name: 'roundtable', category: 'control',
+    description: 'Bounded Orca Lead/Worker relay, maximum six Agent turns. Use an existing active team and controlled-permission local Workers. start registers run_id once; dispatch chooses a Worker and actual task with a unique request_id. Worker product completion wakes this Lead with the actual result; then dispatch again or finish. pause prevents subsequent dispatch, resume retries only proven undelivered work, stop does not claim to abort in-flight execution, getStatus reports results and uncertainty. After dispatch, if the returned state is running with phase worker and inFlight true, end the current turn immediately and wait for the automatic result; do not call more tools or poll. A paused/failed/uncertain result is not successful dispatch. Workers request collaborators in their result to Lead; they cannot control this tool.',
+    inputShape: { action: z.enum(['start', 'dispatch', 'finish', 'pause', 'resume', 'stop', 'getStatus']),
+      run_id: z.string().regex(/^[A-Za-z0-9_-]{1,100}$/), request_id: z.string().min(1).max(100).optional(),
+      worker_id: z.string().min(1).optional(), message: z.string().min(1).max(32000).optional() },
+    handler: async ({ action, run_id, request_id, worker_id, message }) => {
+      const current = getSessionContext();
+      if (!current.sessionId || current.vendorOptions?.orcaRole === 'worker') return errorPayload('LEAD_NOT_SUPPORTED', 'Roundtable requires its owning Lead.');
+      try {
+        const run = await deps.roundtable!({ callerSessionId: current.sessionId, action, runId: run_id,
+          requestId: request_id, workerId: worker_id, message });
+        return okPayload({ run });
+      } catch (error) { return errorPayload('ROUNDTABLE_REJECTED', error instanceof Error ? error.message : String(error)); }
+    },
+  });
   registerStartTeamTool(sink, {
     sessionId: ctx.sessionId,
     vendorOptions: ctx.vendorOptions,

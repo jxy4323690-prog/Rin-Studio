@@ -33,6 +33,7 @@ export const TASK_ACTION_TOOLS: ReadonlySet<string> = new Set([
 ]);
 
 export const ORCA_TASK_ACTION_TOOLS: ReadonlySet<string> = new Set([
+  'roundtable',
   'start_team',
   'create_worker',
   'create_workers',
@@ -242,7 +243,7 @@ export function createTaskActionAuthorizer(deps: {
         ? TASK_ACTION_TOOLS.has(call.tool) || HELPER_AUTOMATION_ACTION_TOOLS.has(call.tool)
         : call.server === 'cindy_scheduler' ? SCHEDULER_TASK_ACTION_TOOLS.has(call.tool)
         : call.server === 'cindy_orca' && ORCA_TASK_ACTION_TOOLS.has(call.tool);
-    if (!protectedAction || (call.tool === 'manage_session_prs' && (call.args as Record<string, unknown>)?.action === 'list')) return { ok: true };
+    if ((call.server === 'cindy_orca' && call.tool === 'roundtable' && (call.args as Record<string, unknown>)?.action === 'getStatus') || !protectedAction || (call.tool === 'manage_session_prs' && (call.args as Record<string, unknown>)?.action === 'list')) return { ok: true };
     const scope = await deps.capture(call);
     if (!scope) return { ok: true }; // ordinary user-delegated Agent task, unchanged
     if (!call.sessionId) return denied();

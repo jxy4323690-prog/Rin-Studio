@@ -59,6 +59,8 @@ export type OrcaInterAgentMessageSource = 'lead' | 'worker';
 /** 一次 lead/worker 间消息派发请求，accepted 回调用于把业务副作用绑定到真正派发边界。 */
 export interface DispatchOrcaInterAgentMessageParams {
   targetSessionId: string;
+  /** Bounded controllers must not leave restartable queue work. */
+  directOnly?: boolean;
   rawContent: string;
   source: OrcaInterAgentMessageSource;
   senderLabel: string;
@@ -357,6 +359,12 @@ export function createOrcaInterAgentDispatcher<TSessionMeta>(
   const dispatchOrEnqueueOrcaInterAgentMessage = async (
     params: DispatchOrcaInterAgentMessageParams,
   ): Promise<DispatchOrcaInterAgentMessageResult> => {
+    if (params.directOnly && params.delivery === 'steer') return {
+      ok: false, dispatchOutcome: {
+        ...createHostSendFailure('SEND_FAILED', 'directOnly does not support steer'),
+        source: params.meta.source, context: params.meta.context,
+      },
+    };
     const [meta, dbRow] = await Promise.all([
       deps.getSessionMeta(params.targetSessionId).catch(() => null),
       deps.getSessionRowSnapshot(params.targetSessionId),
@@ -508,6 +516,7 @@ export function createOrcaInterAgentDispatcher<TSessionMeta>(
         ? { steerFallbackReason: steerFallbackReason ?? 'INPUT_BOUNDARY_BUSY' }
         : {};
     const enqueueQueuedMessage = async (logEvent: string): Promise<DispatchOrcaInterAgentMessageResult> => {
+      if (params.directOnly) return failureResult({ ...createHostSendFailure('SESSION_RUNNING', 'ROUNDTABLE_NOT_DISPATCHED'), source: params.meta.source, context: params.meta.context });
       const createOpts = await deps.buildCreateOptsForQueuedSession(params.targetSessionId, meta);
       const queued = buildQueuedOrcaInterAgentMessage({
         clientId,
@@ -720,6 +729,7 @@ export function createOrcaInterAgentDispatcher<TSessionMeta>(
       if (imageFiles.length > 0) {
         return enqueueQueuedMessage('orca inter-agent message queued for no-live target with images');
       }
+      if (params.directOnly) return failureResult({ ...createHostSendFailure('SESSION_RUNNING', 'ROUNDTABLE_NOT_DISPATCHED'), source: params.meta.source, context: params.meta.context });
       return await sendToInternal();
     } catch (err) {
       return failureResult({

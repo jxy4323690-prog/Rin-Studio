@@ -1394,6 +1394,7 @@ export function createDesktopMcpProviders(deps: DesktopMcpProvidersDeps): LiziMc
     },
     // cindy_orca: 多 worker 协同 team 工具集。创建权限由 Main handler 实时校验。
     orca: {
+      roundtable: wrap((s, params: Parameters<NonNullable<OrcaMcpDeps['roundtable']>>[0]) => s.roundtable(params)),
       authorizeCall: authorizeTaskToolCall,
       startTeam: wrap((s, params) => s.startTeam(params)),
       createWorker: wrap((s, params) => s.createWorker(params)),
